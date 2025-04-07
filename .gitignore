@@ -33,3 +33,4 @@ bot/*
 !.gitkeep
 
 run.sh
+.env
