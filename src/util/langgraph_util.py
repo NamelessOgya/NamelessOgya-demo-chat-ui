@@ -10,6 +10,13 @@ from typing import List
 from src.util.chatgpt_util import get_response
 
 
+
+from langchain_core.outputs import ChatGeneration, ChatResult
+
+import yaml
+import re
+
+
 # LangChain 互換のクラス
 class CustomChatGPTModel(BaseChatModel):
     def __init__(self):
@@ -36,8 +43,6 @@ class CustomChatGPTModel(BaseChatModel):
             })
         return openai_messages
 
-    from langchain_core.outputs import ChatGeneration, ChatResult
-
     def _generate(self, messages: List[BaseMessage], stop: List[str] = None) -> ChatResult:
         openai_messages = self._convert_messages_to_openai_format(messages)
         response = get_response(openai_messages)
@@ -46,10 +51,20 @@ class CustomChatGPTModel(BaseChatModel):
         return ChatResult(generations=[ChatGeneration(message=ai_message)])
 
 
-def get_output_with_schema(llm, name, description, template, input_variables, input_values):
+def get_output_with_schema(
+        llm, 
+        name, 
+        description, 
+        template, 
+        input_variables, 
+        input_values
+    ):
     """
       プロンプトに対する応答を特定のjson formatで受け取る。
     """
+
+    # format instructionを追加
+    template = "format instruction: \n{format_instructions}\n" + template
 
     # ここでスキーマを定義。
     response_schemas = [
@@ -87,6 +102,55 @@ def get_output_with_schema(llm, name, description, template, input_variables, in
 
     return parsed_output
 
+
+def get_output_with_yaml(
+        llm, 
+        name, 
+        description, 
+        template, 
+        input_variables, 
+        input_values
+    ):
+    """
+    LLMからYAML形式で出力を受け取り、辞書に変換して返す。
+    """
+
+    # YAML出力の指示を明示的に追加
+
+    template = (
+        "次の形式でYAMLを出力してください：\n"
+        + f"```yaml\n{name}: value1```\n"
+        + f"{description}\n"
+        + template
+    )
+
+    prompt = PromptTemplate(
+        template=template,
+        input_variables=input_variables
+    )
+
+    chain = LLMChain(llm=llm, prompt=prompt)
+
+    dic = dict(zip(input_variables, input_values))
+    raw_output = chain.invoke(dic)["text"]
+
+    # YAML部分だけ抽出（```yaml ～ ```で囲われてる想定）
+    
+    match = re.search(r"```yaml\n(.*?)```", raw_output, re.DOTALL)
+    if match:
+        yaml_text = match.group(1)
+    else:
+        # fallback: 全体をYAMLと仮定
+        yaml_text = raw_output
+
+    try:
+        parsed_output = yaml.safe_load(yaml_text)
+    except yaml.YAMLError as e:
+        print("YAML parse error:", e)
+        parsed_output = {"error": "Could not parse YAML", "raw": raw_output}
+
+    print(parsed_output)
+    return parsed_output
 
 if __name__ == "__main__":
     llm = CustomChatGPTModel()
