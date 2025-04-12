@@ -4,13 +4,16 @@ from src.util.file_util import read_yaml
 from src.util.chatgpt_util import get_response
 from src.util.langgraph_util import CustomChatGPTModel, get_output_with_schema
 
-from typing import Annotated, Literal, List, Dict, Tuple
+from typing import Annotated, Literal, List, Dict, Tuple, Union, Any
 from typing_extensions import TypedDict
 
 from langchain_core.runnables import RunnableConfig
 
 import random
 from langgraph.graph import StateGraph
+from langgraph.checkpoint.memory import MemorySaver
+
+
 
 
 
@@ -21,6 +24,7 @@ class State(TypedDict):
     result: Dict[str, str] # ex: {"topic_x", "aaaaa"}
     history: str
     agent_reply: str
+    is_finish: bool
 
  
 # サポート関数（ノードの中で使う関数）
@@ -75,6 +79,10 @@ def init_state(state: State, config:RunnableConfig):
 
     state["history"] = "" # ヒアリング履歴を空で初期化
     
+    state["user_input"] = "" # ユーザーの入力を空で初期化
+
+    state["is_finish"] = False
+
     return state
 
 def reformat_dict():
@@ -174,6 +182,17 @@ def user_action(state: State, config: RunnableConfig):
     state["current_node"] = "user_action"
 
     # Streamlitからの入力は state["user_input"] に入れている想定
+    if __name__ == "__main__":
+        raise NotImplementedError("コンソール実装時の挙動を未実装")
+    else:
+        pass
+
+    
+    
+    return state
+
+def register_user_input(state: State, config: RunnableConfig):
+    state["current_node"] = "register_user_input"
     user_input = state.get("user_input", "")
     print("=== state in user_action ===")
     print(state)
@@ -183,19 +202,27 @@ def user_action(state: State, config: RunnableConfig):
         state["history"] += f"human: {user_input}\n"
         print("[user_action] 受け取ったユーザー入力:", user_input)
 
-        # 使い終わったらクリアしておく（何度も追記されないように）
-        state["user_input"] = ""
-
     else:
         print("[user_action] ユーザー入力は空でした。")
 
-    # ※ コンソール実行 (__main__) 時には別途 input() を受け取ってもOKですが
-    #   今回はStreamlitのみを想定するなら不要です。
-    if __name__ == "__main__":
-        pass
-
     return state
 
+
+
+
+def wait_until_get_input(state: State, config: RunnableConfig) -> Literal["user_action", "judge_result"]:
+    # まだ終わってないシナリオを名を取得
+
+    print(f"==conditional node state['user_input'] is {state['user_input']}===")
+    if state["user_input"] == "":
+        
+        return "user_action"
+    else:
+        # ユーザー入力を受け取った
+        
+        # ユーザー入力を受け取れていない
+        print("go to judge ...")
+        return "judge_result"
 
 def judge_result(state: State, config: RunnableConfig):
     """
@@ -240,6 +267,7 @@ def judge_result(state: State, config: RunnableConfig):
 
 def end_node(state: State, config: RunnableConfig):
     state["current_node"] = "end_node"
+    state["is_finish"] = True
     print("ヒアリング完了！")
 
     print("==============")
@@ -249,7 +277,7 @@ def end_node(state: State, config: RunnableConfig):
     # print(state["result"])
     return state
 
-def generate_graph():
+def generate_graph(memory=None):
 # ノードを定義していく
     graph_builder = StateGraph(State)
     graph_builder.add_node("init_state", init_state)
@@ -257,6 +285,8 @@ def generate_graph():
     # graph_builder.add_node("routing", routing)
     graph_builder.add_node("generate_question", generate_question)
     graph_builder.add_node("user_action", user_action)
+    graph_builder.add_node("register_user_input", register_user_input)
+    
     graph_builder.add_node("judge_result", judge_result)
     graph_builder.add_node("end_node", end_node)
 
@@ -270,17 +300,52 @@ def generate_graph():
     )
     
     graph_builder.add_edge("generate_question", "user_action")
-    graph_builder.add_edge("user_action", "judge_result")
+    graph_builder.add_edge("user_action", "register_user_input")
+    graph_builder.add_edge("register_user_input", "judge_result")
+    
+    # graph_builder.add_edge("user_action", "judge_result")
     graph_builder.add_edge("judge_result", "set_topic")
     
 
     graph_builder.set_finish_point("end_node")
 
     # Graphをコンパイル
-    graph = graph_builder.compile()
+    graph = graph_builder.compile(
+        checkpointer = memory,
+        interrupt_before = ["user_action"]
+    )
     # Graphの実行(引数にはStateの初期値を渡す)
 
     return graph
+
+class Agent:
+    def __init__(
+        self
+    ):
+        self.memory = MemorySaver()
+        self.graph = generate_graph(memory = self.memory)
+        
+    # ================
+    # Helper
+    # ================
+    def is_start_node(self, thread: dict) -> bool:
+        return self.graph.get_state(thread).created_at is None
+
+    def is_end_node(self, thread: dict) -> bool:
+        return self.get_state_value(thread, "is_finish")
+
+    def get_next_node(self, thread: dict) -> tuple[str, ...]:
+        return self.graph.get_state(thread).next
+
+    def get_state_value(
+        self, thread: dict, name: str
+    ) -> Union[dict[str, Any], Any, None]:
+        state = self.graph.get_state(thread)
+        if state and name in state.values:
+            return state.values.get(name)
+        return None
+
+
 
 if __name__ == "__main__":
     graph = generate_graph()

@@ -1,78 +1,95 @@
+from typing import Any, Dict
+
 import streamlit as st
-from src.agent.sandbox import generate_graph  # あなたのLangGraph生成関数
 
-# LangGraph用
-from langgraph.graph import StateGraph
+from src.agent.app_session_manager import SessionManager
+from src.agent.app_user_input_logic import input_additional_info, display_input_chat_massage
 
-# 初期化処理
-if "graph" not in st.session_state:
-    st.session_state.graph = generate_graph()
-    st.session_state.graph_stream = st.session_state.graph.stream({}, debug=False)
-    st.session_state.state = None  # LangGraphの現在のstate
-    st.session_state.await_user = False  # ユーザーの発話待ちかどうか
+from src.agent.app_util import stream_graph
 
-# チャット履歴の初期化
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+THREAD_ID = "1"
+st.set_page_config(
+        page_title="アニメ嗜好ヒアリングbot",
+        page_icon="🦜",
+    )
+st.title("アニメ嗜好ヒアリングbot")
 
-# チャット履歴を表示
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
+def main():
+        # チャット履歴の初期化（初回のみ）
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
 
-# LangGraphのステップを進める（ユーザーの入力待ちでないとき）
-if not st.session_state.await_user:
-    for nested_dict in st.session_state.graph_stream:
-        current_node = next(iter(nested_dict))
-        state = nested_dict[current_node]
-        st.session_state.state = state  # 最新ノード状態をセッションに保存
+    # チャット履歴を毎回描画（過去分をすべて表示）
+    for msg in st.session_state.messages:
+        with st.chat_message(msg["role"]):
+            st.markdown(msg["content"])
+    
+    
 
-        if current_node == "generate_question":
-            # エージェントの最新発話を取り出す
-            agent_reply = state["agent_reply"]
-            st.session_state.messages.append({"role": "assistant", "content": agent_reply})
-            with st.chat_message("assistant"):
-                st.markdown(agent_reply)
+    # セッションの初期化
+    if "initialized" not in st.session_state:
+        session_manager = SessionManager()
+        st.session_state.session_manager = session_manager
+        st.session_state.agent = session_manager.get_agent()
+        st.session_state.thread = {"configurable": {"thread_id": THREAD_ID}}
+        st.session_state.initial_input = {}
+        st.session_state.await_user = False
+        st.session_state.user_input_done = False
+        st.session_state.initialized = True
 
-            # ノード１つ実行でループ抜ける
-            break
+    agent = st.session_state.agent
+    thread = st.session_state.thread
 
-        elif current_node == "user_action":
-            # ここで入力待ちにする
+    print("hoge")
+    
+
+    # スタートノードなら最初に実行
+    if agent.is_start_node(thread):
+        stream_graph(agent, st.session_state.initial_input, thread, st.session_state.session_manager)
+
+    # ユーザー入力が必要なノードに来た場合
+    next_graph = agent.get_next_node(thread)
+
+    agent_reply = agent.get_state_value(thread, "agent_reply")
+    
+
+
+    if next_graph:
+        node_name = next_graph[0]
+
+        if node_name == "user_action":
+            print("$$$ input $$$")
             st.session_state.await_user = True
-            break
+            display_input_chat_massage(agent, thread, as_node=node_name)
 
-        elif current_node == "judge_result":
-            st.write("judge_result ノードを実行しました")
-            st.write("現在の history:", state["history"])
-            # ここでも１ステップで抜ける
-            break
+            # ここで入力完了フラグが立っていたらstream_graph実行
+            if st.session_state.user_input_done:
+                stream_graph(agent, None, thread, st.session_state.session_manager)
+                st.session_state.user_input_done = False
+                st.session_state.await_user = False
 
-        elif current_node == "end_node":
-            st.success("ヒアリング完了 🎉")
-            break
-
-# ユーザー入力欄
-prompt = st.chat_input("あなたの返答を入力してください")
-if prompt:
-    # ユーザーメッセージの表示
-    with st.chat_message("user"):
-        st.markdown(prompt)
-    st.session_state.messages.append({"role": "user", "content": prompt})
-
-    # **ユーザー入力を LangGraph の state に格納** (「明示的に代入する」方法)
-    if st.session_state.state:
-        st.session_state.state["user_input"] = prompt
+        else:
+            print("$$$ normal $$$")
+            # 通常ノード（ユーザー入力なし）
+            stream_graph(agent, None, thread, st.session_state.session_manager)
+    
+    if agent.is_end_node(thread):
+        st.markdown("ヒアリング完了！ 🎉")
+    
+    elif agent_reply:
+        agent_reply = agent.get_state_value(thread, "agent_reply")
+        with st.chat_message("agent"):
+            st.markdown(agent_reply)
+        st.session_state.messages.append({"role": "agent", "content": agent_reply})
     else:
-        # まだ初期化されていない場合は適宜処理
-        st.session_state.state = {}
-        st.session_state.state["user_input"] = prompt
+        pass
+    
+    
 
-    # ノードを再開（user_actionノードを進めたい）
-    print("=== state_send ===")
-    print(st.session_state.state)
-    st.session_state.graph_stream.send(st.session_state.state)
+    
+   
 
-    # 入力待ち状態を解除して再描画
-    st.session_state.await_user = False
-    st.rerun()
+
+
+if __name__ == "__main__":
+    main()
